@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🔧 Karigar AI Demo</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-wrapper">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <span class="logo">🔧</span>
+        <div>
+          <h1>Karigar AI</h1>
+          <p>AI-powered home repair marketplace</p>
+        </div>
+      </div>
+      <button class="reset-btn" onclick="resetDemo()">↺ Reset Demo</button>
+    </header>
+
+    <!-- Main two-pane layout -->
+    <main class="panes-container">
+
+      <!-- ============ CUSTOMER PANE ============ -->
+      <section class="pane" id="customer-pane">
+        <div class="pane-header customer-header">
+          <span class="pane-icon">👤</span>
+          <div>
+            <strong>Customer</strong>
+            <small>Homeowner in Jaipur</small>
+          </div>
+          <div class="pane-status" id="customer-status">Online</div>
+        </div>
+
+        <div class="chat-window" id="customer-chat">
+          <div class="chat-bubble bot-bubble intro-bubble">
+            🙏 <strong>Namaste!</strong> Main Karigar AI hoon.<br>
+            Aapke ghar ka koi repair kaam hai?<br>
+            <em>Type a problem, upload a photo, or record a voice note!</em>
+          </div>
+        </div>
+
+        <div class="input-area">
+          <div class="input-row">
+            <input
+              type="text"
+              id="customer-input"
+              class="chat-input"
+              placeholder='Try: "pipe leak under sink" or upload photo...'
+              onkeydown="if(event.key==='Enter') sendCustomerMessage()"
+            />
+            <button class="send-btn" onclick="sendCustomerMessage()">➤</button>
+          </div>
+          <div class="media-row">
+            <label class="media-btn" title="Upload photo">
+              📷
+              <input type="file" id="customer-image-input" accept="image/*" onchange="sendCustomerImage()" hidden />
+            </label>
+            <button class="media-btn" id="customer-voice-btn" title="Voice message" onclick="toggleVoice('customer')">🎤</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ DIVIDER ============ -->
+      <div class="divider">
+        <div class="divider-label">KARIGAR AI</div>
+        <div class="flow-arrows" id="flow-arrows">
+          <div class="arrow-step" id="step-analyze">📊 Analyzing</div>
+          <div class="arrow-step" id="step-match">🔍 Matching</div>
+          <div class="arrow-step" id="step-ping">📱 Pinging</div>
+          <div class="arrow-step" id="step-verify">✅ Verifying</div>
+        </div>
+      </div>
+
+      <!-- ============ WORKER PANE ============ -->
+      <section class="pane" id="worker-pane">
+        <div class="pane-header worker-header">
+          <span class="pane-icon">👷</span>
+          <div>
+            <strong>Worker</strong>
+            <small>Karigar in Jaipur</small>
+          </div>
+          <div class="pane-status" id="worker-status">Ready</div>
+        </div>
+
+        <div class="chat-window" id="worker-chat">
+          <div class="chat-bubble bot-bubble intro-bubble">
+            👋 <strong>Namaste bhai!</strong><br>
+            Main Karigar AI hoon — aapko nearby jobs milenge.<br>
+            <em>Jobs will appear here automatically!</em>
+          </div>
+        </div>
+
+        <div class="input-area">
+          <div class="input-row">
+            <input
+              type="text"
+              id="worker-input"
+              class="chat-input"
+              placeholder='Reply: "haan" (accept) or "nahi" (decline)...'
+              onkeydown="if(event.key==='Enter') sendWorkerMessage()"
+            />
+            <button class="send-btn" onclick="sendWorkerMessage()">➤</button>
+          </div>
+          <div class="media-row">
+            <label class="media-btn" title="Upload completion photo">
+              📷
+              <input type="file" id="worker-image-input" accept="image/*" onchange="sendWorkerImage()" hidden />
+            </label>
+            <button class="media-btn" id="worker-voice-btn" title="Voice message" onclick="toggleVoice('worker')">🎤</button>
+          </div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Status bar -->
+    <footer class="status-bar">
+      <span id="status-text">Ready — try describing a problem!</span>
+      <div class="demo-hints">
+        <span class="hint">💡 Try: "bijli ka switch nahi chal raha"</span>
+        <span class="hint">💡 Worker: type "haan" to accept a job</span>
+        <span class="hint">💡 Worker: type "nahi" to decline + see learning</span>
+      </div>
+    </footer>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>

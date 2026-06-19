@@ -1,0 +1,8 @@
+{
+  "plumbing": {"min": 300, "max": 1500, "fair": 700},
+  "electrical": {"min": 400, "max": 2000, "fair": 900},
+  "carpentry": {"min": 500, "max": 3000, "fair": 1200},
+  "painting": {"min": 1000, "max": 8000, "fair": 3000},
+  "masonry": {"min": 800, "max": 5000, "fair": 2000},
+  "general": {"min": 300, "max": 1500, "fair": 700}
+}
