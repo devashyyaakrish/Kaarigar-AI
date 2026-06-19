@@ -900,38 +900,110 @@ def _webhook_worker_image(phone, img_bytes):
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
-@app.route('/webhook', methods=['POST'])
+@app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
-    from_number = request.form.get('From', '').replace('whatsapp:', '')
-    body = request.form.get('Body', '').strip()
-    media_url = request.form.get('MediaUrl0')
-    
-    # Determine role from phone number (you'll build a users table later)
-    # For now, use a simple env-based split
-    WORKER_PHONES = os.getenv("WORKER_PHONES", "").split(",")
-    is_worker = from_number in WORKER_PHONES
-    
-    if media_url:
-        # Download image and process
-        import requests as req
-        _sid = os.getenv("TWILIO_ACCOUNT_SID", "")
-        _tok = os.getenv("TWILIO_AUTH_TOKEN", "")
-        img_bytes = req.get(media_url, auth=(_sid, _tok)).content
-        if is_worker:
-            reply = _webhook_worker_image(from_number, img_bytes)
-        else:
-            reply = _webhook_customer_image(from_number, img_bytes, body)
-    else:
-        if is_worker:
-            reply = _webhook_worker_text(from_number, body)
-        else:
-            reply = _webhook_customer_text(from_number, body)
-    
-    from whatsapp import send_message
-    if reply:
-        send_message(from_number, reply)
-    
-    return '', 204
+    # ── Meta verification handshake (GET) ──────────────────────────────────
+    if request.method == 'GET':
+        mode      = request.args.get('hub.mode')
+        token     = request.args.get('hub.verify_token')
+        challenge = request.args.get('hub.challenge')
+        print(f"[webhook] GET received — mode={mode} token={token}")
+        if mode == 'subscribe' and token == 'karigar2024':
+            print("[webhook] ✅ Meta verification successful!")
+            return challenge, 200
+        print("[webhook] ❌ Token mismatch or wrong mode")
+        return 'Forbidden', 403
+
+    # ── Incoming WhatsApp message (POST) ───────────────────────────────────
+    try:
+        data    = request.json
+        print(f"[webhook] POST received: {data}")
+
+        entry   = data['entry'][0]
+        changes = entry['changes'][0]
+        value   = changes['value']
+
+        if 'messages' not in value:
+            return '', 200   # delivery receipt / status update — ignore
+
+        msg         = value['messages'][0]
+        from_number = msg['from']   # e.g. "919876543210"
+        msg_type    = msg['type']   # text | image | audio
+
+        WORKER_PHONES = os.getenv("WORKER_PHONES", "").split(",")
+        is_worker = from_number in WORKER_PHONES
+
+        reply_text = ""
+
+        if msg_type == 'text':
+            body = msg['text']['body'].strip()
+            print(f"[webhook] Text from {from_number}: {body}")
+            reply_text = _webhook_worker_text(from_number, body) if is_worker \
+                         else _webhook_customer_text(from_number, body)
+
+        elif msg_type == 'image':
+            media_id  = msg['image']['id']
+            caption   = msg['image'].get('caption', '')
+            img_bytes = _download_meta_media(media_id)
+            reply_text = _webhook_worker_image(from_number, img_bytes) if is_worker \
+                         else _webhook_customer_image(from_number, img_bytes, caption)
+
+        elif msg_type == 'audio':
+            media_id    = msg['audio']['id']
+            audio_bytes = _download_meta_media(media_id)
+            from algorithms.voice import transcribe_voice
+            transcript  = transcribe_voice(audio_bytes, 'audio/ogg')
+            reply_text = _webhook_worker_text(from_number, transcript) if is_worker \
+                         else _webhook_customer_text(from_number, transcript)
+
+        if reply_text:
+            _send_meta_message(from_number, reply_text)
+
+    except Exception as e:
+        print(f"[webhook] Error: {e}")
+        import traceback; traceback.print_exc()
+
+    return '', 200
+
+
+def _download_meta_media(media_id: str) -> bytes:
+    import requests
+    token = os.getenv('META_TOKEN', '')
+    url_res = requests.get(
+        f'https://graph.facebook.com/v19.0/{media_id}',
+        headers={'Authorization': f'Bearer {token}'}
+    )
+    media_url = url_res.json().get('url', '')
+    if not media_url:
+        return b''
+    return requests.get(
+        media_url,
+        headers={'Authorization': f'Bearer {token}'}
+    ).content
+
+
+def _send_meta_message(to: str, body: str):
+    import requests
+    token    = os.getenv('META_TOKEN', '')
+    phone_id = os.getenv('META_PHONE_ID', '')
+    if not token or not phone_id:
+        print("[webhook] ❌ META_TOKEN or META_PHONE_ID not set in .env")
+        return
+    for chunk in [body[i:i+4000] for i in range(0, len(body), 4000)]:
+        r = requests.post(
+            f'https://graph.facebook.com/v19.0/{phone_id}/messages',
+            headers={
+                'Authorization': f'Bearer {token}',
+                'Content-Type': 'application/json'
+            },
+            json={
+                'messaging_product': 'whatsapp',
+                'to': to,
+                'type': 'text',
+                'text': {'body': chunk}
+            }
+        )
+        print(f"[webhook] Sent message → {r.status_code} {r.text[:100]}")
 
 if __name__ == '__main__':
     print("\n" + "="*60)
@@ -939,62 +1011,3 @@ if __name__ == '__main__':
     print("  Open http://localhost:5000 in your browser")
     print("="*60 + "\n")
     app.run(debug=True, port=5000)
-
-# Replace the global SESSION with a per-phone dict
-USER_SESSIONS = {}  # phone → session dict
-
-def get_user_session(phone: str) -> dict:
-    if phone not in USER_SESSIONS:
-        USER_SESSIONS[phone] = {
-            "state": "idle",
-            "history": [],
-            "language": "hinglish",
-            "current_job": None,
-            "matched_workers": [],
-            "selected_worker": None,
-            "excluded_workers": [],
-            "before_image": None,
-            "problem_analysis": None,
-            "price_estimate": None,
-            "awaiting_worker_selection": False,
-            "awaiting_decline_reason": False,
-            "awaiting_rating": False,
-            "role": "customer",   # determined on first message
-            "lat": 26.9124,
-            "lon": 75.7873,
-        }
-    return USER_SESSIONS[phone]
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    from_number = request.form.get('From', '').replace('whatsapp:', '')
-    body = request.form.get('Body', '').strip()
-    media_url = request.form.get('MediaUrl0', '')
-    
-    WORKER_PHONES = os.getenv("WORKER_PHONES", "").split(",")
-    is_worker = from_number in WORKER_PHONES
-
-    reply_text = ""
-
-    if media_url:
-        import requests as req
-        _sid = os.getenv("TWILIO_ACCOUNT_SID", "")
-        _tok = os.getenv("TWILIO_AUTH_TOKEN", "")
-        img_bytes = req.get(media_url, auth=(_sid, _tok)).content
-        if is_worker:
-            reply_text = _webhook_worker_image(from_number, img_bytes)
-        else:
-            reply_text = _webhook_customer_image(from_number, img_bytes, body)
-    else:
-        if is_worker:
-            reply_text = _webhook_worker_text(from_number, body)
-        else:
-            reply_text = _webhook_customer_text(from_number, body)
-
-    # Twilio expects TwiML XML response OR use send_message
-    from whatsapp import send_message
-    send_message(from_number, reply_text)
-
-    # Return TwiML empty response so Twilio doesn't send a default reply
-    return '''<?xml version="1.0" encoding="UTF-8"?>
-<Response></Response>''', 200, {'Content-Type': 'text/xml'}
