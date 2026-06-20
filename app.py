@@ -861,43 +861,216 @@ def _now_dt() -> datetime:
 
 
 # ---------------------------------------------------------------------------
-# Webhook helpers (Twilio real WhatsApp integration)
+# WhatsApp (Meta) — Per-phone-number session store
+# This is SEPARATE from the demo-UI's global SESSION dict above, so the
+# website demo and the real WhatsApp bot never interfere with each other.
 # ---------------------------------------------------------------------------
-def _webhook_customer_text(phone, body):
-    intent_result = detect_intent(body, [])
-    intent = intent_result.get("intent", "general_question")
-    if intent == "job_request":
-        analysis = {"problem_type": intent_result.get("extracted", {}).get("job_type", "general"),
-                    "specific_issue": body, "hindi_summary": body, "severity": "moderate",
-                    "urgency": "normal", "diy_possible": False, "estimated_time_hours": 2,
-                    "materials_likely_needed": [], "confidence": 0.6}
-        price = estimate_price(analysis)
-        workers = find_best_workers(DEFAULT_CUSTOMER_LAT, DEFAULT_CUSTOMER_LON, analysis["problem_type"])
-        return generate_response("job_request", {"matched_workers": workers, "price_estimate": price, "problem_analysis": analysis}, "hinglish", "customer")
-    return generate_response("greeting", {}, "hinglish", "customer")
+WA_SESSIONS = {}          # phone_number -> session dict
+SEEN_MESSAGE_IDS = set()  # for deduplication of Meta webhook retries
 
-def _webhook_customer_image(phone, img_bytes, caption=""):
+
+def _new_wa_session(role: str) -> dict:
+    return {
+        "role": role,                      # "customer" | "worker"
+        "history": [],
+        "language": "hinglish",
+        "state": "idle",                   # idle | awaiting_worker_selection | job_assigned | awaiting_completion | awaiting_rating
+        "problem_analysis": None,
+        "price_estimate": None,
+        "matched_workers": [],
+        "selected_worker": None,
+        "current_job_id": None,
+        "customer_phone": None,            # set on worker session once job is assigned
+        "worker_phone": None,              # set on customer session once worker accepts
+    }
+
+
+def _get_wa_session(phone: str, role: str) -> dict:
+    if phone not in WA_SESSIONS:
+        WA_SESSIONS[phone] = _new_wa_session(role)
+    return WA_SESSIONS[phone]
+
+
+def _is_duplicate(msg_id: str) -> bool:
+    """Meta retries webhook delivery if our response is slow. Dedup by message id."""
+    if not msg_id:
+        return False
+    if msg_id in SEEN_MESSAGE_IDS:
+        return True
+    SEEN_MESSAGE_IDS.add(msg_id)
+    # Keep the set small
+    if len(SEEN_MESSAGE_IDS) > 2000:
+        SEEN_MESSAGE_IDS.clear()
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Webhook helpers (Meta WhatsApp integration) — real state machine
+# ---------------------------------------------------------------------------
+def _webhook_customer_text(phone: str, body: str) -> str:
+    sess = _get_wa_session(phone, "customer")
+    sess["history"].append({"role": "user", "content": body})
+
+    # ---- waiting for worker selection (1/2/3) ----
+    if sess["state"] == "awaiting_worker_selection":
+        stripped = body.strip()
+        if stripped in ("1", "2", "3"):
+            idx = int(stripped) - 1
+            workers = sess.get("matched_workers", [])
+            if idx >= len(workers):
+                return "Sahi number bhejo — 1, 2, ya 3 🙏"
+
+            chosen = workers[idx]
+            worker_info = chosen["worker"]
+            sess["selected_worker"] = worker_info
+            sess["worker_phone"] = worker_info.get("phone", "").replace("+", "")
+            sess["state"] = "job_assigned"
+
+            # Ping the worker
+            worker_phone = sess["worker_phone"]
+            if worker_phone:
+                w_sess = _get_wa_session(worker_phone, "worker")
+                w_sess["state"] = "awaiting_response"
+                w_sess["customer_phone"] = phone
+                w_sess["current_job_id"] = sess.get("current_job_id")
+
+                ping_text = generate_response("job_request", {
+                    "job_description_hindi": sess.get("problem_analysis", {}).get("hindi_summary", body),
+                    "distance": chosen.get("distance_km", "N/A"),
+                    "expected_pay": sess.get("price_estimate", {}).get("fair_single_quote", "TBD"),
+                }, "hinglish", "worker")
+                _send_meta_message(worker_phone, ping_text)
+
+            return (f"✅ *{worker_info['name']}* ko job bhej diya hai!\n"
+                    f"Unka response aate hi aapko batayenge. 🔔")
+        else:
+            return "Please 1, 2, ya 3 reply karo worker choose karne ke liye 🙏"
+
+    # ---- normal intent detection ----
+    intent_result = detect_intent(body, sess["history"])
+    intent = intent_result.get("intent", "general_question")
+    sess["language"] = intent_result.get("language", "hinglish")
+
+    if intent == "job_request":
+        job_type = intent_result.get("extracted", {}).get("job_type", "general")
+        analysis = {
+            "problem_type": job_type, "specific_issue": body, "hindi_summary": body,
+            "severity": "moderate", "urgency": intent_result.get("extracted", {}).get("urgency", "normal"),
+            "diy_possible": False, "estimated_time_hours": 2,
+            "materials_likely_needed": [], "confidence": 0.6,
+        }
+        price = estimate_price(analysis)
+        workers = find_best_workers(DEFAULT_CUSTOMER_LAT, DEFAULT_CUSTOMER_LON, job_type)
+
+        sess["problem_analysis"] = analysis
+        sess["price_estimate"] = price
+        sess["matched_workers"] = workers
+        sess["state"] = "awaiting_worker_selection" if workers else "idle"
+        sess["current_job_id"] = f"job_{phone}_{int(datetime.now().timestamp())}"
+
+        if not workers:
+            return "Maaf kijiye, abhi koi worker available nahi hai aapke area mein 🙏 Thodi der baad try karo."
+
+        return generate_response("job_request", {
+            "matched_workers": workers, "price_estimate": price, "problem_analysis": analysis
+        }, sess["language"], "customer")
+
+    if intent == "price_query":
+        price = estimate_price_from_text(body)
+        return generate_response("price_query", {"price_estimate": price}, sess["language"], "customer")
+
+    return generate_response("greeting", {}, sess["language"], "customer")
+
+
+def _webhook_customer_image(phone: str, img_bytes: bytes, caption: str = "") -> str:
+    sess = _get_wa_session(phone, "customer")
     analysis = analyze_problem_image(img_bytes, caption)
     price = estimate_price(analysis)
     workers = find_best_workers(DEFAULT_CUSTOMER_LAT, DEFAULT_CUSTOMER_LON, analysis.get("problem_type", "general"))
-    return generate_response("job_request", {"matched_workers": workers, "price_estimate": price, "problem_analysis": analysis}, "hinglish", "customer")
 
-def _webhook_worker_text(phone, body):
-    intent_result = detect_intent(body, [])
+    sess["problem_analysis"] = analysis
+    sess["price_estimate"] = price
+    sess["matched_workers"] = workers
+    sess["state"] = "awaiting_worker_selection" if workers else "idle"
+    sess["current_job_id"] = f"job_{phone}_{int(datetime.now().timestamp())}"
+
+    if not workers:
+        return "Maaf kijiye, abhi koi worker available nahi hai aapke area mein 🙏"
+
+    return generate_response("job_request", {
+        "matched_workers": workers, "price_estimate": price, "problem_analysis": analysis
+    }, "hinglish", "customer")
+
+
+def _webhook_worker_text(phone: str, body: str) -> str:
+    sess = _get_wa_session(phone, "worker")
+    sess["history"].append({"role": "user", "content": body})
+
+    intent_result = detect_intent(body, sess["history"])
     intent = intent_result.get("intent", "general_question")
-    if intent == "job_accept":
-        return "Kaam accept! Customer ke paas jao."
-    elif intent == "job_decline":
-        return "Decline reason: 1=Busy 2=Door 3=Skill nahi 4=Rate kam 5=Personal"
-    return "Namaste bhai! Karigar AI hai."
 
-def _webhook_worker_image(phone, img_bytes):
-    v = verify_completion(b"", img_bytes, "completion")
-    if v.get("verification_status") == "verified":
-        return "Kaam verified!"
-    return "Photo review mein hai."
+    # ---- worker accepting a pending job ----
+    if sess["state"] == "awaiting_response" and intent == "job_accept":
+        sess["state"] = "job_active"
+        customer_phone = sess.get("customer_phone")
 
-# ---------------------------------------------------------------------------
+        if customer_phone:
+            c_sess = _get_wa_session(customer_phone, "customer")
+            c_sess["state"] = "job_active"
+            worker = c_sess.get("selected_worker", {})
+            confirm_text = generate_response("customer_worker_assigned", {
+                "name":      worker.get("name", "Worker"),
+                "shop_name": worker.get("shop_name", ""),
+                "trust":     worker.get("trust_score", "N/A"),
+                "jobs":      worker.get("jobs_completed", 0),
+                "distance":  "nearby",
+                "eta":       "10-15",
+            }, c_sess["language"], "customer")
+            _send_meta_message(customer_phone, confirm_text)
+
+        return "✅ Bahut badhiya! Customer ko bata diya hai. Site par pahuncho 🚗\nKaam khatam hone par photo bhejo verification ke liye 📸"
+
+    # ---- worker declining ----
+    if sess["state"] == "awaiting_response" and intent == "job_decline":
+        sess["state"] = "awaiting_decline_reason"
+        return ("Theek hai! 🙏 Decline ka reason batao (number bhejo):\n"
+                "1️⃣ Abhi busy hoon\n2️⃣ Bahut door hai\n3️⃣ Yeh skill nahi hai\n"
+                "4️⃣ Rate kam hai\n5️⃣ Personal reason")
+
+    if sess["state"] == "awaiting_decline_reason" and body.strip() in ("1", "2", "3", "4", "5"):
+        sess["state"] = "idle"
+        customer_phone = sess.get("customer_phone")
+        if customer_phone:
+            c_sess = _get_wa_session(customer_phone, "customer")
+            c_sess["state"] = "awaiting_worker_selection"
+            _send_meta_message(customer_phone,
+                "⏳ Worker abhi available nahi hai. Doosra worker select karo — 1, 2, ya 3 phir se bhejo 🔄")
+        return "Samajh gaya, dhanyawad! Agla kaam jald hi milega 🙏"
+
+    return generate_response("greeting", {}, "hinglish", "worker")
+
+
+def _webhook_worker_image(phone: str, img_bytes: bytes) -> str:
+    sess = _get_wa_session(phone, "worker")
+    job_desc = sess.get("current_job_id", "completion photo")
+
+    verification = verify_completion(b"", img_bytes, str(job_desc))
+    status = verification.get("verification_status", "verified")
+
+    customer_phone = sess.get("customer_phone")
+    if customer_phone:
+        c_sess = _get_wa_session(customer_phone, "customer")
+        c_sess["state"] = "awaiting_rating"
+        _send_meta_message(customer_phone,
+            "✅ *Kaam complete ho gaya!*\nWorker ne photo bheji hai. Kripya rating dijiye (1-5) ⭐")
+
+    if status == "verified":
+        sess["state"] = "idle"
+        return "✅ Kaam verified! Customer ko rating dene ka message bheja gaya. ⭐"
+    return "⚠️ Photo review mein hai. Customer se confirm karenge."
+
+
+
 # Run
 # ---------------------------------------------------------------------------
 @app.route('/webhook', methods=['GET', 'POST'])
@@ -929,8 +1102,14 @@ def webhook():
         msg         = value['messages'][0]
         from_number = msg['from']   # e.g. "919876543210"
         msg_type    = msg['type']   # text | image | audio
+        msg_id      = msg.get('id', '')
 
-        WORKER_PHONES = os.getenv("WORKER_PHONES", "").split(",")
+        # Meta retries delivery if our response is slow — ignore repeats
+        if _is_duplicate(msg_id):
+            print(f"[webhook] Duplicate message {msg_id} — ignoring")
+            return '', 200
+
+        WORKER_PHONES = [p.strip().lstrip('+') for p in os.getenv("WORKER_PHONES", "").split(",") if p.strip()]
         is_worker = from_number in WORKER_PHONES
 
         reply_text = ""
@@ -1010,4 +1189,6 @@ if __name__ == '__main__':
     print("  🔧 KARIGAR AI — WhatsApp Demo Server")
     print("  Open http://localhost:5000 in your browser")
     print("="*60 + "\n")
-    app.run(debug=True, port=5000)
+    port = int(os.getenv("PORT", 5000))
+    debug_mode = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+    app.run(debug=debug_mode, host="0.0.0.0", port=port)

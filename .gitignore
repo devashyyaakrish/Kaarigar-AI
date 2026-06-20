@@ -23,3 +23,10 @@ pip-delete-this-directory.txt
 *.njsproj
 *.sln
 *.swp
+
+.env
+__pycache__/
+*.pyc
+.DS_Store
+venv/
+*.log

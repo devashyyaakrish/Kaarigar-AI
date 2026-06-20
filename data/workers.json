@@ -8,7 +8,7 @@
       "general"
     ],
     "trust_score": 8.7,
-    "jobs_completed": 144,
+    "jobs_completed": 147,
     "jobs_declined": 5,
     "currently_available": true,
     "preferred_radius_km": 8.0,
@@ -23,6 +23,24 @@
     "job_history": [
       {
         "job_id": "job_20260617005952",
+        "rating": 4,
+        "review": null,
+        "type": "plumbing"
+      },
+      {
+        "job_id": "job_20260620112248",
+        "rating": 4,
+        "review": null,
+        "type": "plumbing"
+      },
+      {
+        "job_id": "job_20260620112248",
+        "rating": 4,
+        "review": null,
+        "type": "plumbing"
+      },
+      {
+        "job_id": "job_20260620112248",
         "rating": 4,
         "review": null,
         "type": "plumbing"
